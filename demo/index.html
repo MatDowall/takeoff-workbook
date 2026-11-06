@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>takeoff-workbook demo</title>
+<!--
+  Expects the three libraries side by side; serve the PARENT folder:
+     some-folder/
+       pdf-viewport/   pdf-snap/   takeoff-workbook/
+     npx.cmd serve .   →  http://localhost:3000/takeoff-workbook/demo/
+  The workbook works on its own too — the PDF side is optional.
+-->
+<script type="importmap">
+{ "imports": {
+  "pdfjs-dist": "https://cdn.jsdelivr.net/npm/pdfjs-dist@6.5.438/build/pdf.min.mjs",
+  "pdf-viewport": "../../pdf-viewport/src/index.js",
+  "pdf-snap": "../../pdf-snap/src/index.js",
+  "takeoff-workbook": "../src/index.js"
+} }
+</script>
+<style>
+  html, body { margin: 0; height: 100%; font: 13px system-ui, sans-serif; }
+  body { display: grid; grid-template-columns: minmax(380px, 44%) 1fr; grid-template-rows: auto 1fr; }
+  header { grid-column: 1 / 3; display: flex; gap: 10px; align-items: center; padding: 6px 10px; background: #223c48; color: #fff; flex-wrap: wrap; }
+  header input[type=number] { width: 60px; }
+  #left { display: grid; grid-template-rows: 1fr minmax(110px, 30%); min-height: 0; min-width: 0; border-right: 1px solid #ccd; }
+  #viewer { background: #6b7a80; cursor: crosshair; min-height: 0; }
+  #meas { overflow: auto; background: #f6f8f9; border-top: 1px solid #ccd; padding: 6px 8px; }
+  #meas table { width: 100%; border-collapse: collapse; }
+  #meas td { padding: 2px 4px; border-bottom: 1px solid #e3e8ea; }
+  #meas tr.sel td { background: #e8f0fe; }
+  #meas input { width: 100%; border: 0; background: transparent; font: inherit; }
+  #meas .v { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  #right { min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+  #meas:has(tr) .muted:first-child { display: none; }
+  #wb { flex: 1; min-height: 0; }
+  .muted { color: #8fa3ab; }
+  button { font: inherit; }
+</style>
+</head>
+<body>
+<header>
+  <b>Takeoff</b>
+  <input type="file" id="file" accept="application/pdf" />
+  <label>Scale 1:<input type="number" id="scale" value="100" min="1" /></label>
+  <label><input type="radio" name="mode" value="length" checked /> Length</label>
+  <label><input type="radio" name="mode" value="area" /> Area</label>
+  <span class="muted" title="click points · double-click/Enter finishes · Esc cancels · middle-drag pans · Shift = ortho">ⓘ how to measure</span>
+  <span style="margin-left:auto"></span>
+  <button id="linkBtn" disabled>⛓ Link selected measurement → active cell</button>
+  <button id="save">Save JSON</button>
+  <label style="cursor:pointer">Load JSON <input type="file" id="load" accept="application/json" hidden /></label>
+</header>
+<div id="left">
+  <div id="viewer"></div>
+  <div id="meas"><div class="muted">Measurements appear here. Select one, select a Quantity cell, then Link (or right-click the cell → Link measurement…).</div><table></table></div>
+</div>
+<div id="right"><div id="wb"></div></div>
+
+<script type="module">
+import { Workbook, WorkbookView } from 'takeoff-workbook';
+
+const $ = (id) => document.getElementById(id);
+
+// ------------------------------------------------------------------ workbook (works with or without the PDF side)
+let wb = sample();
+let view = new WorkbookView($('wb'), wb, { onRequestLink: () => linkSelected() });
+window.wb = wb; window.view = view;
+
+function sample() {
+  const w = new Workbook({ userColumnLabels: ['Trade', 'Notes'] , userColumns: 4 });
+  const R = w.rootId;
+  w.batch('Sample', () => {
+    w.setCells(R, [
+      { a1: 'B1', raw: 'SUBSTRUCTURE' },
+      { a1: 'A2', raw: '1.01' }, { a1: 'B2', raw: 'Excavate to reduced level' }, { a1: 'C2', raw: '42' }, { a1: 'D2', raw: 'm3' }, { a1: 'E2', raw: '38.50' }, { a1: 'I2', raw: 'Earthworks' },
+      { a1: 'A3', raw: '1.02' }, { a1: 'B3', raw: 'Concrete slab 100mm' }, { a1: 'D3', raw: 'm2' }, { a1: 'E3', raw: '96' }, { a1: 'I3', raw: 'Concrete' },
+      { a1: 'A4', raw: '1.03' }, { a1: 'B4', raw: 'Perimeter footing' }, { a1: 'C4', raw: '8.4' }, { a1: 'D4', raw: 'm3' }, { a1: 'E4', raw: '410' }, { a1: 'G4', raw: '1.05' }, { a1: 'I4', raw: 'Concrete' },
+      { a1: 'B5', raw: 'Substructure subtotal' },
+      { a1: 'B6', raw: 'Contingency' }, { a1: 'C6', raw: '1' }, { a1: 'D6', raw: 'item' }, { a1: 'E6', raw: '=H5*5%' },
+    ]);
+    w.setRowType(R, 1, 'heading');
+    w.setRowType(R, 5, 'subtotal');
+  });
+  return w;
+}
+
+function setWorkbook(next) {
+  view.destroy();
+  wb = next; window.wb = wb;
+  view = new WorkbookView($('wb'), wb, { onRequestLink: () => linkSelected() });
+  window.view = view;
+  view.addEventListener('select', updateLinkBtn);
+  wb.addEventListener('change', () => renderMeasures());
+  for (const m of measures) pushMeasurement(m); // re-attach live values
+}
+view.addEventListener('select', updateLinkBtn);
+
+$('save').onclick = () => {
+  const blob = new Blob([JSON.stringify(wb.toJSON(), null, 1)], { type: 'application/json' });
+  const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: 'estimate.json' });
+  a.click();
+};
+$('load').onchange = async (e) => {
+  const f = e.target.files[0];
+  if (f) setWorkbook(Workbook.fromJSON(JSON.parse(await f.text())));
+};
+
+// ------------------------------------------------------------------ measurements → workbook
+const measures = []; // { id, name, kind, pts:[{x,y}] in PDF units }
+let selectedMeasure = null;
+let nextId = 1;
+
+const scale = () => Number($('scale').value) || 1;
+const PT_MM = 25.4 / 72;
+function measureValue(m) {
+  if (m.kind === 'area') {
+    let a = 0;
+    for (let i = 0, n = m.pts.length; i < n; i++) { const p = m.pts[i], q = m.pts[(i + 1) % n]; a += p.x * q.y - q.x * p.y; }
+    return Math.abs(a / 2) * PT_MM * PT_MM * scale() * scale() / 1e6; // m²
+  }
+  let L = 0;
+  for (let i = 1; i < m.pts.length; i++) L += Math.hypot(m.pts[i].x - m.pts[i - 1].x, m.pts[i].y - m.pts[i - 1].y);
+  return L * PT_MM * scale() / 1000; // m
+}
+function pushMeasurement(m) {
+  wb.setMeasurement(m.id, { value: +measureValue(m).toFixed(4), unit: m.kind === 'area' ? 'm2' : 'm', name: m.name });
+}
+function renderMeasures() {
+  const t = $('meas').querySelector('table');
+  t.innerHTML = '';
+  for (const m of measures) {
+    const tr = document.createElement('tr');
+    tr.className = m === selectedMeasure ? 'sel' : '';
+    const links = wb.linksTo(m.id).length;
+    tr.innerHTML = `<td style="width:16px">${m.kind === 'area' ? '▱' : '／'}</td><td><input value="${m.name}"></td>
+      <td class="v">${measureValue(m).toFixed(2)} ${m.kind === 'area' ? 'm²' : 'm'}</td>
+      <td class="muted" style="width:60px">${links ? `⛓ ${links}` : ''}</td><td style="width:20px"><button title="Delete">✕</button></td>`;
+    tr.onclick = (e) => { if (e.target.tagName !== 'INPUT') { selectedMeasure = m; renderMeasures(); updateLinkBtn(); } };
+    tr.querySelector('input').onchange = (e) => { m.name = e.target.value; pushMeasurement(m); };
+    tr.querySelector('button').onclick = (e) => {
+      e.stopPropagation();
+      measures.splice(measures.indexOf(m), 1);
+      wb.removeMeasurement(m.id); // linked cells show #REF! — nothing silently becomes 0
+      if (selectedMeasure === m) selectedMeasure = null;
+      renderMeasures(); redraw();
+    };
+    t.appendChild(tr);
+  }
+}
+function updateLinkBtn() {
+  const def = wb.columns(view.sheetId)[view.activeCell().col];
+  $('linkBtn').disabled = !selectedMeasure || !def || def.computed || (def.type === 'text' && !def.user);
+}
+function linkSelected() {
+  if (!selectedMeasure) return alert('Select a measurement in the list first.');
+  view.linkActive(selectedMeasure.id);
+  renderMeasures();
+}
+$('linkBtn').onclick = linkSelected;
+// change of scale → every measurement → every linked cell → totals, live
+$('scale').oninput = () => { measures.forEach(pushMeasurement); renderMeasures(); };
+wb.addEventListener('change', () => renderMeasures());
+
+// ------------------------------------------------------------------ PDF side (optional)
+let vp, snapper, constrainAngle, layer, current = [], cursor = null;
+try {
+  const pdfjsLib = await import('pdfjs-dist');
+  const { PdfViewport } = await import('pdf-viewport');
+  const snapMod = await import('pdf-snap');
+  constrainAngle = snapMod.constrainAngle;
+  pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('pdf.worker.min.mjs', import.meta.resolve('pdfjs-dist')).href;
+  vp = new PdfViewport($('viewer'), { panButtons: [1] });
+  snapper = new snapMod.PdfSnapper(vp, { OPS: pdfjsLib.OPS, radiusPx: 12 });
+  window.vp = vp; window.snapper = snapper;
+  layer = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  vp.overlayGroup.insertBefore(layer, vp.overlayGroup.firstChild);
+  let task;
+  $('file').onchange = async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    await task?.destroy();
+    task = pdfjsLib.getDocument({ data: new Uint8Array(await f.arrayBuffer()) });
+    const doc = await task.promise;
+    const page = await doc.getPage(1);
+    await vp.setPage(page);
+    await snapper.setPage(page);
+  };
+} catch (err) {
+  $('viewer').innerHTML = `<div style="color:#fff;padding:20px">PDF side unavailable (${err.message}).<br>Put pdf-viewport and pdf-snap next to this folder.</div>`;
+}
+
+const mode = () => document.querySelector('input[name=mode]:checked').value;
+function pointFromEvent(e) {
+  const hit = snapper.snapClient(e.clientX, e.clientY, { from: current.length ? vp.pdfToPage(current.at(-1).x, current.at(-1).y) : undefined });
+  if (hit) return hit.pdf;
+  const r = vp.container.getBoundingClientRect();
+  const pg = vp.screenToPage(e.clientX - r.left, e.clientY - r.top);
+  let p = vp.pageToPdf(pg.x, pg.y);
+  if (e.shiftKey && current.length) p = constrainAngle(current.at(-1), p, 45);
+  return p;
+}
+function shape(pts, closed, colour, dashed) {
+  const el = document.createElementNS('http://www.w3.org/2000/svg', closed ? 'polygon' : 'polyline');
+  el.setAttribute('points', pts.map((p) => { const q = vp.pdfToPage(p.x, p.y); return `${q.x},${q.y}`; }).join(' '));
+  const a = { fill: closed ? colour + '33' : 'none', stroke: colour, 'stroke-width': 2.5, 'vector-effect': 'non-scaling-stroke', 'stroke-linejoin': 'round' };
+  if (dashed) a['stroke-dasharray'] = '6 4';
+  for (const [k, v] of Object.entries(a)) el.setAttribute(k, v);
+  layer.appendChild(el);
+}
+function redraw() {
+  if (!layer) return;
+  layer.replaceChildren();
+  for (const m of measures) shape(m.pts, m.kind === 'area', m === selectedMeasure ? '#e53935' : '#1e88e5');
+  if (current.length) shape(cursor ? [...current, cursor] : current, false, '#e53935', true);
+  if (snapper) snapper.extraPoints = measures.flatMap((m) => m.pts.flatMap((p) => [p.x, p.y]));
+}
+function finish() {
+  const pts = current.filter((p, i) => i === 0 || Math.hypot(p.x - current[i - 1].x, p.y - current[i - 1].y) > 1e-6);
+  const kind = mode();
+  if (pts.length >= (kind === 'area' ? 3 : 2)) {
+    const m = { id: `m${nextId}`, name: `${kind === 'area' ? 'Area' : 'Length'} ${nextId}`, kind, pts };
+    nextId++;
+    measures.push(m);
+    selectedMeasure = m;
+    pushMeasurement(m);
+    renderMeasures(); updateLinkBtn();
+  }
+  current = []; redraw();
+}
+$('viewer').addEventListener('pointermove', (e) => { if (snapper?.engine) { cursor = pointFromEvent(e); if (current.length) redraw(); } });
+$('viewer').addEventListener('click', (e) => { if (e.button === 0 && snapper?.engine) { current.push(pointFromEvent(e)); redraw(); } });
+$('viewer').addEventListener('dblclick', finish);
+addEventListener('keydown', (e) => {
+  if (document.activeElement?.closest?.('.twb')) return; // keys belong to the workbook
+  if (e.key === 'Enter') finish();
+  else if (e.key === 'Escape') { current = []; redraw(); }
+});
+window.demo = { measures, finish, get current() { return current; } };
+</script>
+</body>
+</html>

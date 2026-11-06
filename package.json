@@ -1,0 +1,15 @@
+{
+  "name": "takeoff-workbook",
+  "version": "1.0.0",
+  "description": "Drill-down estimating workbook (CostX-style Cost/Quantity/Rate sheets) with live measurement links and a self-updating calculation engine",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "test:browser": "node test/browser.test.mjs"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^24.43.1"
+  },
+  "license": "UNLICENSED"
+}
