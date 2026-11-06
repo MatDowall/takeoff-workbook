@@ -601,3 +601,89 @@ export function offsetFormula(body, dCol, dRow) {
     return { ...r, col: indexToCol(c), row };
   });
 }
+
+// ------------------------------------------------------------------ catalogue (autocomplete & hints)
+
+/**
+ * Every function the evaluator knows, with its signature and a one-line description.
+ * The UI uses this for autocomplete and the argument hint; add an entry when you add to FN.
+ */
+export const FUNCTIONS = [
+  { name: 'SUM', args: ['number1', '[number2]', '…'], desc: 'Adds numbers, cells and ranges' },
+  { name: 'AVERAGE', args: ['number1', '[number2]', '…'], desc: 'Average of numbers or ranges (ignores blanks and text)' },
+  { name: 'MIN', args: ['number1', '[number2]', '…'], desc: 'Smallest value' },
+  { name: 'MAX', args: ['number1', '[number2]', '…'], desc: 'Largest value' },
+  { name: 'COUNT', args: ['value1', '[value2]', '…'], desc: 'How many numbers' },
+  { name: 'ROUND', args: ['number', '[digits]'], desc: 'Round to a number of decimal places (halves away from zero)' },
+  { name: 'ROUNDUP', args: ['number', '[digits]'], desc: 'Round away from zero — e.g. whole sheets, lengths' },
+  { name: 'ROUNDDOWN', args: ['number', '[digits]'], desc: 'Round towards zero' },
+  { name: 'CEILING', args: ['number', '[significance]'], desc: 'Round up to a multiple — e.g. CEILING(7.1, 0.6) → 7.2 (sheet lengths)' },
+  { name: 'FLOOR', args: ['number', '[significance]'], desc: 'Round down to a multiple' },
+  { name: 'ABS', args: ['number'], desc: 'Absolute value' },
+  { name: 'SQRT', args: ['number'], desc: 'Square root' },
+  { name: 'PI', args: [], desc: '3.14159…' },
+  { name: 'IF', args: ['test', 'value_if_true', '[value_if_false]'], desc: 'Choose a value by a condition' },
+  { name: 'IFERROR', args: ['value', 'value_if_error'], desc: 'Fallback when a value is an error' },
+  { name: 'AND', args: ['test1', '[test2]', '…'], desc: 'TRUE if all tests are true' },
+  { name: 'OR', args: ['test1', '[test2]', '…'], desc: 'TRUE if any test is true' },
+  { name: 'NOT', args: ['test'], desc: 'Reverses TRUE/FALSE' },
+  { name: 'MEAS', args: ['"measurement name"'], desc: 'Value of a takeoff measurement by name' },
+];
+export const FUNCTION_INFO = Object.fromEntries(FUNCTIONS.map((f) => [f.name, f]));
+
+/**
+ * Where is the caret, syntactically? Used by the editor for autocomplete,
+ * argument hints and deciding whether a click should insert a reference.
+ *
+ * @param {string} text  full input text (starting with '=')
+ * @param {number} caret
+ * @returns {{ inString:boolean, word:{start:number,text:string}|null, call:{name:string,arg:number}|null, measPrefix:string|null, canInsertRef:boolean }}
+ */
+export function caretContext(text, caret) {
+  const before = text.slice(0, caret);
+  // inside a string literal? (even number of quotes = outside)
+  const quotes = (before.match(/"/g) || []).length;
+  const inString = quotes % 2 === 1;
+  let measPrefix = null;
+  if (inString) {
+    const m = /MEAS\(\s*"([^"]*)$/i.exec(before);
+    if (m) measPrefix = m[1];
+  }
+  // word being typed (function or name)
+  let word = null;
+  if (!inString) {
+    const m = /([A-Za-z_][A-Za-z0-9_.]*)$/.exec(before);
+    if (m) {
+      const start = caret - m[1].length;
+      const prev = text[start - 1] ?? '';
+      if (!/[A-Za-z0-9_$\].!"]/.test(prev)) word = { start, text: m[1] };
+    }
+  }
+  // innermost unclosed function call and which argument the caret is in
+  let call = null;
+  {
+    let depth = 0,
+      arg = 0,
+      inStr = inString; // scanning backwards from inside a string starts "in" it
+    for (let i = before.length - 1; i >= 0; i--) {
+      const ch = before[i];
+      if (ch === '"') inStr = !inStr;
+      if (inStr) continue;
+      if (ch === ')') depth++;
+      else if (ch === ',' && depth === 0) arg++;
+      else if (ch === '(') {
+        if (depth === 0) {
+          const m = /([A-Za-z_][A-Za-z0-9_.]*)\s*$/.exec(before.slice(0, i));
+          if (m) call = { name: m[1].toUpperCase(), arg };
+          break;
+        }
+        depth--;
+      }
+    }
+  }
+  // can a reference be inserted here? (Excel's "point mode": after = ( , operator or :)
+  const trimmed = before.replace(/\s+$/, '');
+  const last = trimmed[trimmed.length - 1] ?? '';
+  const canInsertRef = !inString && trimmed.trimStart().startsWith('=') && /[=(,+\-*/^&<>:]/.test(last);
+  return { inString, word, call, measPrefix, canInsertRef };
+}

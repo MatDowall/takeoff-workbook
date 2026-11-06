@@ -53,6 +53,7 @@ function cloneSheet(s) {
     rowCount: s.rowCount,
     cells: new Map([...s.cells].map(([k, c]) => [k, structuredClone(c)])),
     rowTypes: new Map(s.rowTypes),
+    rowHeights: new Map(s.rowHeights),
   };
 }
 const sheetToJSON = (s) => ({
@@ -63,6 +64,7 @@ const sheetToJSON = (s) => ({
   rowCount: s.rowCount,
   cells: Object.fromEntries(s.cells),
   rowTypes: Object.fromEntries(s.rowTypes),
+  ...(s.rowHeights.size ? { rowHeights: Object.fromEntries(s.rowHeights) } : {}),
 });
 const sheetFromJSON = (j) => ({
   id: j.id,
@@ -72,6 +74,7 @@ const sheetFromJSON = (j) => ({
   rowCount: j.rowCount ?? 0,
   cells: new Map(Object.entries(j.cells ?? {})),
   rowTypes: new Map(Object.entries(j.rowTypes ?? {}).map(([r, t]) => [+r, t])),
+  rowHeights: new Map(Object.entries(j.rowHeights ?? {}).map(([r, h]) => [+r, h])),
 });
 
 export class Workbook extends EventTarget {
@@ -92,6 +95,11 @@ export class Workbook extends EventTarget {
     this.names = new Map();
     /** measurements (owned by the app): id → { value, unit, name } */
     this.measurements = new Map();
+    /**
+     * Column widths are per SHEET KIND (like CostX templates): widen Description
+     * once and every quantity sheet, however deep, gets it. Row heights are per sheet.
+     */
+    this.layout = { cols: { cost: {}, rate: {}, quantity: {} } };
 
     this._cache = new Map();
     this._deps = new Map(); // key → Set(keys it read)
@@ -104,7 +112,7 @@ export class Workbook extends EventTarget {
     this._colsCache = new Map();
 
     if (!o._empty) {
-      const root = { id: uid(), name: o.name ?? 'Estimate', kind: KIND.COST, parent: null, rowCount: o.rows ?? 30, cells: new Map(), rowTypes: new Map() };
+      const root = { id: uid(), name: o.name ?? 'Estimate', kind: KIND.COST, parent: null, rowCount: o.rows ?? 30, cells: new Map(), rowTypes: new Map(), rowHeights: new Map() };
       this.sheets.set(root.id, root);
       this.rootId = root.id;
     }
@@ -434,7 +442,7 @@ export class Workbook extends EventTarget {
 
   _transact(label, fn) {
     if (this._tx) return fn(); // nested → part of the outer transaction
-    this._tx = { label, before: new Map(), names: null, structural: false, keys: new Set() };
+    this._tx = { label, before: new Map(), names: null, layout: null, structural: false, keys: new Set() };
     let result;
     try {
       result = fn();
@@ -442,23 +450,28 @@ export class Workbook extends EventTarget {
       // roll back partial changes
       const tx = this._tx;
       this._tx = null;
-      this._restore(tx.before, tx.names);
+      this._restore(tx.before, tx.names, tx.layout);
       this._invalidateAll();
       this._emit(null);
       throw e;
     }
     const tx = this._tx;
     this._tx = null;
-    if (tx.before.size || tx.names) {
+    if (tx.before.size || tx.names || tx.layout) {
       const after = new Map();
       for (const id of tx.before.keys()) after.set(id, this.sheets.has(id) ? cloneSheet(this.sheets.get(id)) : null);
-      this._undo.push({ label, before: tx.before, after, namesBefore: tx.names, namesAfter: tx.names ? new Map(this.names) : null });
+      this._undo.push({
+        label, before: tx.before, after,
+        namesBefore: tx.names, namesAfter: tx.names ? new Map(this.names) : null,
+        layoutBefore: tx.layout, layoutAfter: tx.layout ? structuredClone(this.layout) : null,
+      });
       if (this._undo.length > 500) this._undo.shift();
       this._redo.length = 0;
       if (tx.structural) {
         this._invalidateAll();
         this._emit(null);
-      } else this._emit(this._invalidate(tx.keys));
+      } else if (tx.layout && !tx.keys.size && !tx.before.size) this._emit(new Set(), { layout: true });
+      else this._emit(this._invalidate(tx.keys), { layout: !!tx.layout || tx.rowLayout });
     }
     return result;
   }
@@ -472,12 +485,16 @@ export class Workbook extends EventTarget {
   _touchNames() {
     if (!this._tx.names) this._tx.names = new Map(this.names);
   }
-  _restore(snap, names) {
+  _touchLayout() {
+    if (!this._tx.layout) this._tx.layout = structuredClone(this.layout);
+  }
+  _restore(snap, names, layout) {
     for (const [id, s] of snap) {
       if (s) this.sheets.set(id, cloneSheet(s));
       else this.sheets.delete(id);
     }
     if (names) this.names = new Map(names);
+    if (layout) this.layout = structuredClone(layout);
   }
   get canUndo() {
     return this._undo.length > 0;
@@ -488,7 +505,7 @@ export class Workbook extends EventTarget {
   undo() {
     const step = this._undo.pop();
     if (!step) return false;
-    this._restore(step.before, step.namesBefore);
+    this._restore(step.before, step.namesBefore, step.layoutBefore);
     this._redo.push(step);
     this._invalidateAll();
     this._emit(null);
@@ -497,15 +514,15 @@ export class Workbook extends EventTarget {
   redo() {
     const step = this._redo.pop();
     if (!step) return false;
-    this._restore(step.after, step.namesAfter);
+    this._restore(step.after, step.namesAfter, step.layoutAfter);
     this._undo.push(step);
     this._invalidateAll();
     this._emit(null);
     return step.label;
   }
 
-  _emit(keys) {
-    this.dispatchEvent(new CustomEvent('change', { detail: { keys } }));
+  _emit(keys, extra) {
+    this.dispatchEvent(new CustomEvent('change', { detail: { keys, ...extra } }));
   }
 
   // ================================================================ editing
@@ -594,6 +611,7 @@ export class Workbook extends EventTarget {
         rowCount: 12,
         cells: new Map(),
         rowTypes: new Map(),
+        rowHeights: new Map(),
       };
       this._touch(child.id);
       this.sheets.set(child.id, child);
@@ -736,6 +754,36 @@ export class Workbook extends EventTarget {
     return n;
   }
 
+  // ================================================================ layout (column widths, row heights)
+
+  /** Column width in px for a sheet (per sheet kind; falls back to columns.js). */
+  columnWidth(sheetId, col) {
+    const kind = this.sheets.get(sheetId)?.kind ?? KIND.COST;
+    return this.layout.cols[kind]?.[col] ?? this.columns(sheetId)[col]?.width ?? 90;
+  }
+  /** Set (px) or reset (null) a column width — applies to every sheet of this kind. Undoable. */
+  setColumnWidth(sheetId, col, px) {
+    const kind = this.sheets.get(sheetId)?.kind ?? KIND.COST;
+    return this._transact('Column width', () => {
+      this._touchLayout();
+      const k = (this.layout.cols[kind] ??= {});
+      if (px == null) delete k[col];
+      else k[col] = Math.round(Math.max(24, Math.min(1200, px)));
+    });
+  }
+  rowHeight(sheetId, row) {
+    return this.sheets.get(sheetId)?.rowHeights.get(row) ?? null; // null = default
+  }
+  /** Set (px) or reset (null) a row height. Taller rows wrap their text. Undoable. */
+  setRowHeight(sheetId, row, px) {
+    return this._transact('Row height', () => {
+      const s = this._touch(sheetId);
+      if (px == null) s.rowHeights.delete(row);
+      else s.rowHeights.set(row, Math.round(Math.max(16, Math.min(400, px))));
+      this._tx.rowLayout = true;
+    });
+  }
+
   // ================================================================ rows
 
   /** Insert `n` blank rows before row `at`. Formulas everywhere are adjusted, like Excel. */
@@ -744,6 +792,7 @@ export class Workbook extends EventTarget {
       const s = this._touch(sheetId);
       s.cells = shiftCells(s.cells, (row) => (row >= at ? row + n : row));
       s.rowTypes = new Map([...s.rowTypes].map(([r, t]) => [r >= at ? r + n : r, t]));
+      s.rowHeights = new Map([...s.rowHeights].map(([r, h]) => [r >= at ? r + n : r, h]));
       s.rowCount += n;
       this._moveChildren(sheetId, (row) => (row >= at ? row + n : row));
       this._rewriteRefsTo(sheetId, (row) => (row >= at ? row + n : row), (r0, r1) => [r0 >= at ? r0 + n : r0, r1 >= at ? r1 + n : r1]);
@@ -763,6 +812,7 @@ export class Workbook extends EventTarget {
       const map = (row) => (row < at ? row : row > end ? row - n : null);
       s.cells = shiftCells(s.cells, map);
       s.rowTypes = new Map([...s.rowTypes].filter(([r]) => map(r) !== null).map(([r, t]) => [map(r), t]));
+      s.rowHeights = new Map([...s.rowHeights].filter(([r]) => map(r) !== null).map(([r, h]) => [map(r), h]));
       s.rowCount = Math.max(0, s.rowCount - Math.max(0, Math.min(end, s.rowCount) - at + 1));
       this._moveChildren(sheetId, map);
       this._rewriteRefsTo(sheetId, map, (r0, r1) => {
@@ -948,6 +998,7 @@ export class Workbook extends EventTarget {
       userColumns: this.userColumns,
       userColumnLabels: this.userColumnLabels,
       names: [...this.names.values()],
+      layout: this.layout,
       sheets: [...this.sheets.values()].map(sheetToJSON),
       // last known measurement values, so a reopened estimate shows the right
       // numbers before the takeoff app pushes live ones
@@ -961,6 +1012,7 @@ export class Workbook extends EventTarget {
     wb.rootId = j.rootId;
     for (const s of j.sheets) wb.sheets.set(s.id, sheetFromJSON(s));
     for (const n of j.names ?? []) wb.names.set(n.name.toLowerCase(), n);
+    if (j.layout?.cols) wb.layout = { cols: { cost: {}, rate: {}, quantity: {}, ...j.layout.cols } };
     for (const [id, m] of Object.entries(j.measurements ?? {})) wb.measurements.set(id, m);
     return wb;
   }

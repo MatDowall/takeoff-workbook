@@ -45,9 +45,28 @@ const again = Workbook.fromJSON(JSON.parse(localStorage.estimate));
 | Delete | clear (breakdowns are protected) |
 | Ctrl+Z / Ctrl+Y | undo / redo (500 steps, including drills and row ops) |
 | Ctrl+C / Ctrl+V | internal copy keeps breakdowns, links and relative formulas. Text from Excel or Sheets pastes as values and formulas. |
-| right-click | drill / remove breakdown, link / unlink / edit modifier, insert / delete rows, heading / subtotal rows, notes |
+| right-click | drill / remove breakdown, link / unlink / edit modifier, insert / delete rows, heading / subtotal rows, auto-fit / reset sizes, notes |
+| row number / column header | select the whole row / column |
 
 The status bar shows the Sum and Count of the selection.
+
+### Writing formulas (Excel-style, and better than CostX at it)
+
+- **Autocomplete at the cursor.** Type `=RO` and a list of `ROUND`, `ROUNDUP`, `ROUNDDOWN` opens under the cell, each with its arguments and a description. Use ↑↓ to choose and **Tab** or **Enter** to insert `ROUNDUP(`. Workbook names are listed too, and `link` when you're editing a measurement modifier. Inside `MEAS("` it lists your **measurements** by name.
+- **Argument hint.** Inside a function a tooltip shows the signature with the current argument in bold, for example `ROUNDUP(number, **[digits]**)`. It moves along as you type commas.
+- **Point at cells instead of typing references.** Wherever a reference can go (after `=` `(` `,` `+ - * / ^ &` `< >` or `:`):
+  - **click** a cell to insert `H2`; **drag** to insert a range `H2:H4`. Clicking again replaces the pointed reference until you type something else.
+  - **arrow keys** move the pointed reference and **Shift+arrows** extend it to a range, just like Excel's point mode. Press **F2** to switch between point mode and moving the caret.
+  - **Other sheets:** mid-formula, open a breakdown (▸) or click the breadcrumb. The edit carries on in the formula bar ("editing Estimate › J12…"), and clicks insert `[Sheet name]!H1`. **Enter** commits and takes you back to the cell you were editing; **Esc** cancels and also takes you back.
+- **Colour-coded references.** Every reference in the formula is outlined on the grid in its own colour while you edit. The one you're pointing at has a moving dashed border.
+- The in-cell editor grows over the neighbouring cells as you type, and the formula bar shows the same text.
+
+### Column widths and row heights
+
+- **Drag** a column header's right edge, or a row number's bottom edge.
+- **Double-click** a column edge to auto-fit the widest content on the sheet. Double-click a row edge to reset it.
+- Column widths apply to **every sheet of the same kind**, like CostX templates: widen Description once and every quantity sheet, at any depth, gets it. Row heights belong to their sheet, and taller rows wrap their text.
+- Both are undoable, move with inserted and deleted rows, and are saved in the JSON (`layout`, `rowHeights`).
 
 ---
 
@@ -137,12 +156,15 @@ Structural edits (drill, row insert/delete, undo) clear the memo and recompute l
 | `insertRows(sheetId, at, n)` · `deleteRows(…)` · `setRowType(sheetId, row, 'normal'\|'heading'\|'subtotal')` | structure |
 | `copy(sheetId, r0, c0, r1, c1)` → clip · `paste(sheetId, row, colIndex, clip)` · `pasteText(…, tsv)` | clipboard |
 | `renameSheet` · `setName` · `setNote` | |
+| `columnWidth` / `setColumnWidth(sheetId, col, px\|null)` · `rowHeight` / `setRowHeight(sheetId, row, px\|null)` | layout (undoable, saved) |
 | `undo()` / `redo()` / `batch(label, fn)` · `canUndo` / `canRedo` | history |
 | `root` / `sheet(id)` / `path(id)` / `children(id)` / `columns(id)` | navigation |
 | `toJSON()` / `Workbook.fromJSON(json)` | persistence |
 | `'change'` event | `detail.keys` = the invalidated keys, or `null` for structural changes |
 
-**WorkbookView** (`new WorkbookView(el, wb, { onRequestLink, minRows, spareRows })`): `openSheet(id, a1?)`, `activeCell()`, `linkActive(measurementId, expr?)`, `focus()`, `destroy()`. It fires `'select'` events.
+**WorkbookView** (`new WorkbookView(el, wb, { onRequestLink, minRows, spareRows })`): `openSheet(id, a1?)`, `activeCell()`, `edit(text?)`, `linkActive(measurementId, expr?)`, `focus()`, `destroy()`. It fires `'select'` events.
+
+**Formula helpers** (`formula.js`): `FUNCTIONS` (name, args, description: the autocomplete catalogue; add an entry when you add a function) and `caretContext(text, caret)` (the word being typed, the enclosing call and argument number, whether a reference can be inserted, and whether the caret is inside `MEAS("`). Use them to build the same assistance into other editors.
 
 ---
 
@@ -151,14 +173,18 @@ Structural edits (drill, row insert/delete, undo) clear the memo and recompute l
 - The grid is a plain `<table>`, re-filled from the memoised engine on each change (about 1 ms for hundreds of rows). Add row virtualisation if sheets ever reach tens of thousands of rows.
 - There's one formula language, Excel-like but small; adding a function is one entry in the `FN` table in `formula.js`. Names must not look like cell refs (`gst15` would be read as a reference).
 - Collaborative editing (cell locks, like Nezo's) isn't included. The transaction log in `_transact` is the natural hook for sending edits to a server.
-- There's no styling, number-format UI or column resizing yet. Column widths and decimal places are in `columns.js`.
+- There's no styling or number-format UI yet. Default column widths and decimal places are in `columns.js`.
 
 ## Tests
 
 ```
-npm test              # formula engine + workbook model (19 tests incl. 5,000-row perf)
-npm run test:browser  # headless Chrome on the demo: typing, Ctrl+Enter drill, Alt+↑, undo/redo,
-                      # PDF measure → link → change scale → live totals, F2 link modifier, deleted measurement → #REF!
+npm test              # formula engine + workbook model (18 tests incl. 5,000-row perf)
+npm run test:browser  # headless Chrome on the demo:
+                      #  browser.e2e.mjs — typing, Ctrl+Enter drill, Alt+↑, undo/redo, PDF measure → link →
+                      #                    change scale → live totals, F2 link modifier, deleted measurement → #REF!
+                      #  editing.e2e.mjs — autocomplete + argument hints, click/drag/arrow pointing,
+                      #                    cross-sheet [Sheet]!refs, colour highlights, MEAS("… completion,
+                      #                    column/row resize, auto-fit, undo, saved layout
 ```
 
 ## Files

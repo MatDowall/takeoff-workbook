@@ -6,7 +6,7 @@
   "main": "src/index.js",
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "test:browser": "node test/browser.test.mjs"
+    "test:browser": "node test/browser.e2e.mjs && node test/editing.e2e.mjs"
   },
   "devDependencies": {
     "puppeteer-core": "^24.43.1"
